@@ -1,616 +1,390 @@
 #!/usr/bin/env python3
 """
-NCERT Textbook Downloader
-=========================
-Interactive CLI tool to download NCERT textbooks (PDFs/ZIPs)
-from ncert.nic.in with organized folder structure.
-
-Author: Gurukulam Project
+NCERT Textbook Downloader - Scans ncert.nic.in for available books
 """
-
-import os
-import sys
-import time
-import zipfile
-import shutil
+import os, sys, time, zipfile, shutil, re
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 
 try:
     import requests
 except ImportError:
-    print("❌ 'requests' module not found. Installing...")
-    os.system(f"{sys.executable} -m pip install requests")
+    os.system(f"{sys.executable} -m pip install requests -q")
     import requests
 
 try:
     from tqdm import tqdm
 except ImportError:
-    print("❌ 'tqdm' module not found. Installing...")
-    os.system(f"{sys.executable} -m pip install tqdm")
+    os.system(f"{sys.executable} -m pip install tqdm -q")
     from tqdm import tqdm
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS & MAPPINGS
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
 BASE_URL = "https://ncert.nic.in/textbook/pdf/"
+TEXTBOOK_PAGE = "https://ncert.nic.in/textbook.php"
 
-# Class codes (1-12 → a-l)
-CLASSES = {
-    1: 'a', 2: 'b', 3: 'c', 4: 'd', 5: 'e', 6: 'f',
-    7: 'g', 8: 'h', 9: 'i', 10: 'j', 11: 'k', 12: 'l'
+CLASS_CODES = {1:'a',2:'b',3:'c',4:'d',5:'e',6:'f',7:'g',8:'h',9:'i',10:'j',11:'k',12:'l'}
+LANG_CODES = {'e':'English', 'h':'Hindi', 'u':'Urdu'}
+
+# Known subject codes (will be validated by scanning)
+SUBJECT_CODES = {
+    'mh':'Mathematics','ph':'Physics','ch':'Chemistry','bo':'Biology',
+    'sc':'Science','ss':'Social Science','en':'English','hi':'Hindi',
+    'sk':'Sanskrit','ec':'Economics','ac':'Accountancy','bs':'Business Studies',
+    'hy':'History','gy':'Geography','ps':'Political Science','py':'Psychology',
+    'so':'Sociology','cs':'Computer Science','ip':'Informatics Practices',
+    'st':'Statistics','fa':'Fine Arts','hs':'Home Science','ev':'EVS',
+    'ci':'Civics','he':'Health Education','le':'Legal Studies',
+    'ms':'Mass Media','mu':'Music','th':'Theatre','an':'Anthropology',
+    'hu':'Human Ecology','bt':'Biotechnology','ee':'Entrepreneurship',
+    'kk':'Rimjhim','rl':'Ruchira','dd':'Durva' # Hindi language books
 }
 
-# Language codes
-LANGUAGES = {
-    'English': 'e',
-    'Hindi': 'h',
-    'Urdu': 'u'
-}
+# Colors
+C = type('C', (), {
+    'R':'\033[91m','G':'\033[92m','Y':'\033[93m','B':'\033[94m',
+    'M':'\033[95m','C':'\033[96m','W':'\033[97m','D':'\033[90m',
+    'BD':'\033[1m','E':'\033[0m'
+})()
 
-# Subject codes - comprehensive mapping by class groups
-SUBJECTS = {
-    # Primary (Class 1-5)
-    'primary': {
-        'Mathematics': 'mh',
-        'English': 'en',
-        'Hindi': 'hi',
-        'EVS': 'ev',
-    },
-    # Middle (Class 6-8)
-    'middle': {
-        'Mathematics': 'mh',
-        'Science': 'sc',
-        'Social Science': 'ss',
-        'English': 'en',
-        'Hindi': 'hi',
-        'Sanskrit': 'sk',
-    },
-    # Secondary (Class 9-10)
-    'secondary': {
-        'Mathematics': 'mh',
-        'Science': 'sc',
-        'Social Science': 'ss',
-        'English': 'en',
-        'Hindi': 'hi',
-        'Sanskrit': 'sk',
-        'Economics': 'ec',
-        'History': 'hy',
-        'Geography': 'gy',
-        'Political Science': 'ps',
-    },
-    # Senior Secondary (Class 11-12)
-    'senior': {
-        'Mathematics': 'mh',
-        'Physics': 'ph',
-        'Chemistry': 'ch',
-        'Biology': 'bo',
-        'English': 'en',
-        'Hindi': 'hi',
-        'Sanskrit': 'sk',
-        'Economics': 'ec',
-        'Accountancy': 'ac',
-        'Business Studies': 'bs',
-        'History': 'hy',
-        'Geography': 'gy',
-        'Political Science': 'ps',
-        'Psychology': 'py',
-        'Sociology': 'so',
-        'Computer Science': 'cs',
-        'Informatics': 'ip',
-        'Statistics': 'st',
-        'Fine Arts': 'fa',
-        'Home Science': 'hs',
-    }
-}
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+def tw(): 
+    try: return shutil.get_terminal_size().columns
+    except: return 80
 
-# Colors for terminal output
-class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    MAGENTA = '\033[35m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    END = '\033[0m'
+def cls(): os.system('cls' if os.name=='nt' else 'clear')
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# UTILITY FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def get_terminal_width() -> int:
-    """Get terminal width, default to 80."""
+def url_exists(url):
     try:
-        return shutil.get_terminal_size().columns
-    except:
-        return 80
+        r = requests.head(url, timeout=5, allow_redirects=True)
+        return r.status_code == 200
+    except: return False
 
+def banner():
+    w = tw()
+    print(f"{C.C}{C.BD}")
+    print(f"┌{'─'*(w-2)}┐")
+    art = [
+        "  ███╗   ██╗ ██████╗███████╗██████╗ ████████╗",
+        "  ████╗  ██║██╔════╝██╔════╝██╔══██╗╚══██╔══╝",
+        "  ██╔██╗ ██║██║     █████╗  ██████╔╝   ██║   ",
+        "  ██║╚██╗██║██║     ██╔══╝  ██╔══██╗   ██║   ",
+        "  ██║ ╚████║╚██████╗███████╗██║  ██║   ██║   ",
+        "  ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝   ╚═╝   ",
+    ]
+    for line in art:
+        pad = (w - 2 - len(line)) // 2
+        print(f"│{' '*pad}{line}{' '*(w-2-pad-len(line))}│")
+    title = "📚 NCERT Textbook Downloader 📚"
+    pad = (w - 2 - len(title)) // 2
+    print(f"│{' '*pad}{title}{' '*(w-2-pad-len(title))}│")
+    print(f"└{'─'*(w-2)}┘{C.E}")
 
-def clear_screen():
-    """Clear terminal screen."""
-    os.system('cls' if os.name == 'nt' else 'clear')
+def hdr(txt):
+    print(f"\n{C.Y}{'─'*tw()}{C.E}")
+    print(f"{C.BD}{C.G} {txt}{C.E}")
 
-
-def print_banner():
-    """Display the application banner."""
-    width = get_terminal_width()
-    banner = f"""
-{Colors.CYAN}{Colors.BOLD}
-╔══════════════════════════════════════════════════════════════════╗
-║                                                                  ║
-║   ███╗   ██╗ ██████╗███████╗██████╗ ████████╗                    ║
-║   ████╗  ██║██╔════╝██╔════╝██╔══██╗╚══██╔══╝                    ║
-║   ██╔██╗ ██║██║     █████╗  ██████╔╝   ██║                       ║
-║   ██║╚██╗██║██║     ██╔══╝  ██╔══██╗   ██║                       ║
-║   ██║ ╚████║╚██████╗███████╗██║  ██║   ██║                       ║
-║   ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝   ╚═╝                       ║
-║                                                                  ║
-║              📚 NCERT Textbook Downloader 📚                     ║
-║                                                                  ║
-╚══════════════════════════════════════════════════════════════════╝
-{Colors.END}
-"""
-    print(banner)
-
-
-def print_header(text: str):
-    """Print a styled header."""
-    width = min(get_terminal_width(), 70)
-    print(f"\n{Colors.YELLOW}{'─' * width}{Colors.END}")
-    print(f"{Colors.BOLD}{Colors.GREEN}  {text}{Colors.END}")
-    print(f"{Colors.YELLOW}{'─' * width}{Colors.END}\n")
-
-
-def print_menu_grid(title: str, options: list, show_back: bool = True, cols: int = 0) -> int:
-    """Display options in a grid layout for better visibility."""
-    print_header(title)
+def grid_menu(title, options, cols=4):
+    """Display options in a compact grid."""
+    hdr(title)
+    if not options:
+        print(f"  {C.R}No options available{C.E}")
+        return None
     
-    # Calculate optimal columns based on terminal width and option lengths
-    term_width = get_terminal_width() - 4
-    max_opt_len = max(len(opt) for opt in options) + 6  # [N] option
+    # Calculate column width
+    max_len = max(len(str(o)) for o in options) + 6  # [XX] option
+    w = tw() - 2
+    cols = max(1, min(cols, w // max_len))
+    col_w = w // cols
     
-    if cols == 0:
-        cols = max(1, min(4, term_width // max_opt_len))
+    # Print grid
+    for i, opt in enumerate(options):
+        idx = f"[{i+1:2d}]" if len(options) > 9 else f"[{i+1}]"
+        cell = f" {C.C}{idx}{C.E} {opt}"
+        # Calculate visible length (without color codes)
+        vis_len = len(idx) + len(str(opt)) + 2
+        padding = col_w - vis_len
+        print(cell + ' '*max(0,padding), end='')
+        if (i+1) % cols == 0: print()
+    if len(options) % cols != 0: print()
     
-    col_width = term_width // cols
-    
-    # Print options in grid
-    for i, option in enumerate(options, 1):
-        label = f"{Colors.CYAN}[{i:2d}]{Colors.END} {option}"
-        padding = col_width - len(f"[{i:2d}] {option}")
-        
-        print(f"  {label}{' ' * max(0, padding)}", end='')
-        
-        if i % cols == 0:
-            print()  # New line after each row
-    
-    # Add newline if last row wasn't complete
-    if len(options) % cols != 0:
-        print()
-    
-    if show_back:
-        print(f"\n  {Colors.RED}[0]{Colors.END} ← Back / Exit")
-    
-    print()
+    print(f"\n {C.R}[0]{C.E} Back/Exit")
     
     while True:
         try:
-            choice = input(f"  {Colors.BOLD}Enter choice: {Colors.END}").strip()
-            if choice == '':
-                continue
-            choice = int(choice)
-            if show_back and choice == 0:
-                return 0
-            if 1 <= choice <= len(options):
-                return choice
-            print(f"  {Colors.RED}Invalid choice. Try again.{Colors.END}")
+            ch = input(f" {C.BD}►{C.E} ").strip()
+            if ch == '': continue
+            n = int(ch)
+            if n == 0: return None
+            if 1 <= n <= len(options): return n - 1
+            print(f" {C.R}Invalid{C.E}", end='\r')
         except ValueError:
-            print(f"  {Colors.RED}Please enter a number.{Colors.END}")
+            print(f" {C.R}Number please{C.E}", end='\r')
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCANNING FUNCTIONS - Discovers what's available on NCERT website
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def get_subject_group(class_num: int) -> str:
-    """Get subject group based on class number."""
-    if class_num <= 5:
-        return 'primary'
-    elif class_num <= 8:
-        return 'middle'
-    elif class_num <= 10:
-        return 'secondary'
-    else:
-        return 'senior'
-
-
-def build_book_code(class_num: int, language: str, subject_code: str, part: int) -> str:
-    """Build the book code from selections."""
-    class_code = CLASSES[class_num]
-    lang_code = LANGUAGES[language]
-    return f"{class_code}{lang_code}{subject_code}{part}"
-
-
-def build_download_url(book_code: str, chapter: Optional[str] = None) -> str:
-    """Build the download URL."""
-    if chapter:
-        return f"{BASE_URL}{book_code}{chapter}.pdf"
-    else:
-        return f"{BASE_URL}{book_code}dd.zip"
-
-
-def create_download_folder(class_num: int, subject: str, chapter: bool = False) -> Path:
-    """Create and return the download folder path."""
-    base_dir = Path(__file__).parent / "NCERT" / f"Class_{class_num}" / subject.replace(" ", "_")
+def scan_subjects(class_num: int) -> Dict[str, str]:
+    """Scan available subjects for a class."""
+    print(f"\n {C.D}Scanning subjects for Class {class_num}...{C.E}", end=' ', flush=True)
     
-    if chapter:
-        base_dir = base_dir / "chapters"
+    cc = CLASS_CODES[class_num]
+    found = {}
     
-    base_dir.mkdir(parents=True, exist_ok=True)
-    return base_dir
-
-
-def check_url_exists(url: str) -> Tuple[bool, int]:
-    """Check if a URL exists and return status."""
-    try:
-        response = requests.head(url, timeout=10, allow_redirects=True)
-        return response.status_code == 200, response.status_code
-    except requests.RequestException:
-        return False, 0
-
-
-def download_file(url: str, save_path: Path, max_retries: int = 3) -> bool:
-    """Download a file with progress bar and retry logic."""
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            size_mb = total_size / (1024*1024)
-            
-            print(f"\n  {Colors.CYAN}📥 {save_path.name}{Colors.END} ({size_mb:.2f} MB)")
-            
-            with open(save_path, 'wb') as f:
-                with tqdm(total=total_size, unit='B', unit_scale=True, 
-                         desc="     ", bar_format='{l_bar}{bar:30}| {n_fmt}/{total_fmt} [{rate_fmt}]',
-                         ncols=70) as pbar:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            pbar.update(len(chunk))
-            
-            print(f"  {Colors.GREEN}✅ Done!{Colors.END}")
-            return True
-            
-        except requests.RequestException as e:
-            print(f"  {Colors.RED}❌ Attempt {attempt + 1} failed: {e}{Colors.END}")
-            if attempt < max_retries - 1:
-                print(f"  {Colors.YELLOW}   Retrying...{Colors.END}")
-                time.sleep(2)
-    
-    print(f"  {Colors.RED}❌ Failed after {max_retries} attempts.{Colors.END}")
-    return False
-
-
-def extract_zip(zip_path: Path, extract_to: Path) -> bool:
-    """Extract a ZIP file."""
-    try:
-        print(f"\n  {Colors.CYAN}📦 Extracting...{Colors.END}")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_to)
-        print(f"  {Colors.GREEN}✅ Extracted to: {extract_to.name}/{Colors.END}")
-        return True
-    except zipfile.BadZipFile:
-        print(f"  {Colors.RED}❌ Invalid ZIP file.{Colors.END}")
-        return False
-
-
-def find_available_parts(class_num: int, language: str, subject_code: str) -> List[int]:
-    """Find available parts by checking URLs."""
-    print(f"\n  {Colors.DIM}Checking available parts...{Colors.END}", end=' ', flush=True)
-    
-    available = []
-    for part in range(1, 5):  # Check up to 4 parts
-        book_code = build_book_code(class_num, language, subject_code, part)
-        # Check if either ZIP or chapter 01 exists
-        zip_url = build_download_url(book_code)
-        ch1_url = build_download_url(book_code, "01")
-        
-        zip_exists, _ = check_url_exists(zip_url)
-        ch1_exists, _ = check_url_exists(ch1_url)
-        
-        if zip_exists or ch1_exists:
-            available.append(part)
-            print(f"{Colors.GREEN}Part {part} ✓{Colors.END}", end=' ', flush=True)
-        else:
-            # Stop if we hit a gap after finding some parts
-            if available:
+    # Try all known subject codes with all languages
+    for sc, name in SUBJECT_CODES.items():
+        for lang in ['e', 'h']:  # English and Hindi are most common
+            for part in [1, 2]:
+                code = f"{cc}{lang}{sc}{part}"
+                # Check if ZIP or chapter 01 exists
+                if url_exists(f"{BASE_URL}{code}dd.zip") or url_exists(f"{BASE_URL}{code}01.pdf"):
+                    if sc not in found:
+                        found[sc] = name
+                        print(f"{C.G}✓{C.E}", end='', flush=True)
+                    break
+            if sc in found:
                 break
     
-    print()  # New line
-    return available if available else [1]  # Default to Part 1
+    print(f" ({len(found)} found)")
+    return found
 
-
-def find_available_chapters(book_code: str) -> List[str]:
-    """Find available chapters for a book by checking URLs."""
-    print(f"\n  {Colors.DIM}Scanning chapters...{Colors.END} ", end='', flush=True)
-    available = []
-    consecutive_misses = 0
+def scan_languages(class_num: int, subject_code: str) -> List[str]:
+    """Scan available languages for a subject."""
+    print(f" {C.D}Scanning languages...{C.E}", end=' ', flush=True)
     
-    # First, try common chapter patterns
-    for ch in range(0, 50):  # Start from 0 for prelims, go up to 50
-        chapter_str = f"{ch:02d}"
-        url = build_download_url(book_code, chapter_str)
+    cc = CLASS_CODES[class_num]
+    found = []
+    
+    for lang_code, lang_name in LANG_CODES.items():
+        for part in [1, 2]:
+            code = f"{cc}{lang_code}{subject_code}{part}"
+            if url_exists(f"{BASE_URL}{code}dd.zip") or url_exists(f"{BASE_URL}{code}01.pdf"):
+                found.append(lang_code)
+                print(f"{C.G}{lang_name}{C.E}", end=' ', flush=True)
+                break
+    
+    print()
+    return found
+
+def scan_parts(class_num: int, lang_code: str, subject_code: str) -> List[int]:
+    """Scan available parts for a book."""
+    print(f" {C.D}Scanning parts...{C.E}", end=' ', flush=True)
+    
+    cc = CLASS_CODES[class_num]
+    found = []
+    
+    for part in range(1, 5):
+        code = f"{cc}{lang_code}{subject_code}{part}"
+        if url_exists(f"{BASE_URL}{code}dd.zip") or url_exists(f"{BASE_URL}{code}01.pdf"):
+            found.append(part)
+            print(f"{C.G}Part {part}{C.E}", end=' ', flush=True)
+    
+    print()
+    return found if found else [1]
+
+def scan_chapters(book_code: str) -> List[str]:
+    """Scan available chapters."""
+    print(f" {C.D}Scanning chapters...{C.E}", end=' ', flush=True)
+    
+    found = []
+    misses = 0
+    
+    for ch in range(0, 40):
+        ch_str = f"{ch:02d}"
+        if url_exists(f"{BASE_URL}{book_code}{ch_str}.pdf"):
+            found.append(ch_str)
+            print(f"{C.G}{ch}{C.E}", end=' ', flush=True)
+            misses = 0
+        else:
+            misses += 1
+            if misses > 3 and found: break
+    
+    # Check special sections
+    for sp in ['ps','an','ap','gl','lp']:
+        if url_exists(f"{BASE_URL}{book_code}{sp}.pdf"):
+            found.append(sp)
+            print(f"{C.M}{sp}{C.E}", end=' ', flush=True)
+    
+    print()
+    return found
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOWNLOAD FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_folder(class_num: int, subject: str, is_chapter=False) -> Path:
+    folder = Path(__file__).parent / "NCERT" / f"Class_{class_num}" / subject.replace(' ','_')
+    if is_chapter: folder = folder / "chapters"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+def download(url: str, path: Path) -> bool:
+    try:
+        r = requests.get(url, stream=True, timeout=30)
+        r.raise_for_status()
+        size = int(r.headers.get('content-length', 0))
         
-        try:
-            response = requests.head(url, timeout=5, allow_redirects=True)
-            if response.status_code == 200:
-                available.append(chapter_str)
-                print(f"{Colors.GREEN}{ch}{Colors.END} ", end='', flush=True)
-                consecutive_misses = 0
-            else:
-                consecutive_misses += 1
-        except:
-            consecutive_misses += 1
+        print(f"\n {C.C}⬇ {path.name}{C.E} ({size/(1024*1024):.1f} MB)")
         
-        # Stop after 5 consecutive misses if we've found some chapters
-        if consecutive_misses >= 5 and len(available) > 0:
-            break
+        with open(path, 'wb') as f:
+            with tqdm(total=size, unit='B', unit_scale=True, ncols=50, 
+                     bar_format=' {bar}| {n_fmt}/{total_fmt} [{rate_fmt}]') as pb:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+                    pb.update(len(chunk))
         
-        # Stop early if no chapters found in first 10
-        if ch >= 10 and len(available) == 0:
-            break
+        print(f" {C.G}✓ Done{C.E}")
+        return True
+    except Exception as e:
+        print(f" {C.R}✗ Failed: {e}{C.E}")
+        return False
+
+def download_zip(class_num, lang, subject, subject_code, part):
+    code = f"{CLASS_CODES[class_num]}{lang}{subject_code}{part}"
+    url = f"{BASE_URL}{code}dd.zip"
     
-    # Also check for special codes like ps (preliminary section), an (answers)
-    for special in ['ps', 'an', 'ap', 'gl']:  # preliminaries, answers, appendix, glossary
-        url = f"{BASE_URL}{book_code}{special}.pdf"
-        try:
-            response = requests.head(url, timeout=3, allow_redirects=True)
-            if response.status_code == 200:
-                available.append(special)
-                print(f"{Colors.MAGENTA}{special}{Colors.END} ", end='', flush=True)
-        except:
-            pass
-    
-    print(f"\n  {Colors.GREEN}Found {len(available)} items{Colors.END}")
-    return available
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN MENU FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def select_class() -> Optional[int]:
-    """Select class number."""
-    options = [f"Class {i}" for i in range(1, 13)]
-    choice = print_menu_grid("📚 Select Class", options, cols=4)
-    return choice if choice > 0 else None
-
-
-def select_language() -> Optional[str]:
-    """Select language."""
-    options = list(LANGUAGES.keys())
-    choice = print_menu_grid("🌐 Select Language", options, cols=3)
-    return options[choice - 1] if choice > 0 else None
-
-
-def select_subject(class_num: int) -> Optional[Tuple[str, str]]:
-    """Select subject for the given class."""
-    group = get_subject_group(class_num)
-    subjects = SUBJECTS[group]
-    options = list(subjects.keys())
-    
-    choice = print_menu_grid(f"📖 Subjects for Class {class_num}", options, cols=3)
-    if choice > 0:
-        subject_name = options[choice - 1]
-        return subject_name, subjects[subject_name]
-    return None
-
-
-def select_part(available_parts: List[int]) -> Optional[int]:
-    """Select book part from available options."""
-    if len(available_parts) == 1:
-        print(f"\n  {Colors.DIM}Only Part {available_parts[0]} available.{Colors.END}")
-        return available_parts[0]
-    
-    options = [f"Part {p}" for p in available_parts]
-    choice = print_menu_grid("📑 Select Part", options, cols=4)
-    return available_parts[choice - 1] if choice > 0 else None
-
-
-def select_download_type() -> Optional[int]:
-    """Select download type."""
-    options = [
-        "📦 Complete Book (ZIP)",
-        "📄 Single Chapter (PDF)",
-        "📥 All Chapters (PDFs)"
-    ]
-    choice = print_menu_grid("⬇️  Download Type", options, cols=1)
-    return choice if choice > 0 else None
-
-
-def download_complete_book(class_num: int, language: str, subject: str, 
-                           subject_code: str, part: int) -> bool:
-    """Download the complete book as ZIP."""
-    book_code = build_book_code(class_num, language, subject_code, part)
-    url = build_download_url(book_code)
-    
-    print(f"\n  {Colors.DIM}Code: {book_code} | URL: {url}{Colors.END}")
-    
-    # Check if URL exists
-    exists, status = check_url_exists(url)
-    if not exists:
-        print(f"\n  {Colors.RED}❌ Book ZIP not found (Status: {status}){Colors.END}")
-        print(f"  {Colors.YELLOW}   Try downloading individual chapters instead.{Colors.END}")
+    if not url_exists(url):
+        print(f" {C.R}✗ ZIP not available{C.E}")
         return False
     
-    # Create folder and download
-    folder = create_download_folder(class_num, subject)
-    filename = f"{book_code}dd.zip"
-    save_path = folder / filename
+    folder = make_folder(class_num, subject)
+    path = folder / f"{code}dd.zip"
     
-    if save_path.exists():
-        print(f"\n  {Colors.YELLOW}⚠️  File exists: {save_path.name}{Colors.END}")
-        overwrite = input(f"  Overwrite? (y/n): ").strip().lower()
-        if overwrite != 'y':
-            return False
-    
-    success = download_file(url, save_path)
-    
-    if success:
-        extract = input(f"\n  Extract ZIP? (y/n): ").strip().lower()
-        if extract == 'y':
-            extract_to = folder / book_code
-            extract_zip(save_path, extract_to)
-    
-    return success
+    if download(url, path):
+        if input(f" Extract? (y/n): ").lower() == 'y':
+            try:
+                with zipfile.ZipFile(path, 'r') as z:
+                    z.extractall(folder / code)
+                print(f" {C.G}✓ Extracted to {code}/{C.E}")
+            except: print(f" {C.R}✗ Extract failed{C.E}")
+        return True
+    return False
 
+def download_chapter(class_num, lang, subject, subject_code, part, chapters):
+    code = f"{CLASS_CODES[class_num]}{lang}{subject_code}{part}"
+    
+    # Let user select chapter
+    labels = []
+    for ch in chapters:
+        if ch.isdigit() or (len(ch)==2 and ch[0]=='0'):
+            labels.append(f"Ch {int(ch)}")
+        else:
+            labels.append(ch.upper())
+    
+    idx = grid_menu(f"Select Chapter ({len(chapters)} available)", labels)
+    if idx is None: return False
+    
+    ch = chapters[idx]
+    url = f"{BASE_URL}{code}{ch}.pdf"
+    folder = make_folder(class_num, subject, True)
+    return download(url, folder / f"{code}{ch}.pdf")
 
-def download_single_chapter(class_num: int, language: str, subject: str,
-                            subject_code: str, part: int) -> bool:
-    """Download a single chapter."""
-    book_code = build_book_code(class_num, language, subject_code, part)
+def download_all_chapters(class_num, lang, subject, subject_code, part, chapters):
+    code = f"{CLASS_CODES[class_num]}{lang}{subject_code}{part}"
+    folder = make_folder(class_num, subject, True)
     
-    # Find available chapters
-    chapters = find_available_chapters(book_code)
+    print(f"\n {C.G}Downloading {len(chapters)} files...{C.E}")
+    ok = 0
+    for ch in chapters:
+        path = folder / f"{code}{ch}.pdf"
+        if path.exists():
+            print(f" {C.Y}⏭ {path.name} exists{C.E}")
+            ok += 1
+        elif download(f"{BASE_URL}{code}{ch}.pdf", path):
+            ok += 1
+        time.sleep(0.2)
     
-    if not chapters:
-        print(f"\n  {Colors.RED}❌ No chapters found.{Colors.END}")
-        return False
-    
-    # Create display labels
-    def chapter_label(ch):
-        if ch.isdigit() or (len(ch) == 2 and ch[0] == '0'):
-            return f"Chapter {int(ch)}"
-        return ch.upper()
-    
-    options = [chapter_label(ch) for ch in chapters]
-    choice = print_menu_grid(f"📄 Select Chapter ({len(chapters)} available)", options, cols=4)
-    
-    if choice == 0:
-        return False
-    
-    # Get the actual chapter code (fix: use choice-1 as index)
-    chapter = chapters[choice - 1]
-    url = build_download_url(book_code, chapter)
-    
-    print(f"\n  {Colors.DIM}Downloading: {book_code}{chapter}.pdf{Colors.END}")
-    
-    folder = create_download_folder(class_num, subject, chapter=True)
-    filename = f"{book_code}{chapter}.pdf"
-    save_path = folder / filename
-    
-    return download_file(url, save_path)
+    print(f"\n {C.G}✓ {ok}/{len(chapters)} downloaded{C.E}")
+    return ok > 0
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN FLOW
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def download_all_chapters(class_num: int, language: str, subject: str,
-                          subject_code: str, part: int) -> bool:
-    """Download all available chapters."""
-    book_code = build_book_code(class_num, language, subject_code, part)
-    
-    # Find available chapters
-    chapters = find_available_chapters(book_code)
-    
-    if not chapters:
-        print(f"\n  {Colors.RED}❌ No chapters found.{Colors.END}")
-        return False
-    
-    print(f"\n  {Colors.GREEN}Downloading {len(chapters)} files...{Colors.END}")
-    
-    folder = create_download_folder(class_num, subject, chapter=True)
-    success_count = 0
-    
-    for chapter in chapters:
-        url = build_download_url(book_code, chapter)
-        filename = f"{book_code}{chapter}.pdf"
-        save_path = folder / filename
-        
-        if save_path.exists():
-            print(f"\n  {Colors.YELLOW}⏭️  Skip (exists): {filename}{Colors.END}")
-            success_count += 1
-            continue
-        
-        if download_file(url, save_path):
-            success_count += 1
-        
-        time.sleep(0.3)  # Small delay between downloads
-    
-    print(f"\n  {Colors.GREEN}✅ Downloaded {success_count}/{len(chapters)} files.{Colors.END}")
-    return success_count > 0
-
-
-def show_summary(class_num: int, language: str, subject: str, part: int):
-    """Show selection summary."""
-    width = min(get_terminal_width(), 70)
-    print(f"\n{Colors.BOLD}{'═' * width}{Colors.END}")
-    print(f"  {Colors.GREEN}📚 Class {class_num} │ {language} │ {subject} │ Part {part}{Colors.END}")
-    print(f"{'═' * width}")
-
-
-def main_flow():
-    """Main application flow."""
+def main():
     while True:
-        clear_screen()
-        print_banner()
+        cls()
+        banner()
         
-        # Step 1: Select Class
-        class_num = select_class()
-        if not class_num:
-            print(f"\n  {Colors.GREEN}👋 Goodbye!{Colors.END}\n")
+        # 1. Select Class
+        classes = [f"Class {i}" for i in range(1, 13)]
+        idx = grid_menu("Select Class", classes)
+        if idx is None: break
+        class_num = idx + 1
+        
+        # 2. Scan & Select Subject
+        subjects = scan_subjects(class_num)
+        if not subjects:
+            input(f" {C.R}No subjects found. Press Enter...{C.E}")
+            continue
+        
+        subj_list = list(subjects.items())  # [(code, name), ...]
+        subj_names = [s[1] for s in subj_list]
+        idx = grid_menu(f"Subjects for Class {class_num}", subj_names, cols=3)
+        if idx is None: continue
+        subject_code, subject_name = subj_list[idx]
+        
+        # 3. Scan & Select Language
+        languages = scan_languages(class_num, subject_code)
+        if not languages:
+            input(f" {C.R}No languages found. Press Enter...{C.E}")
+            continue
+        
+        if len(languages) == 1:
+            lang = languages[0]
+            print(f" {C.D}Only {LANG_CODES[lang]} available{C.E}")
+        else:
+            lang_names = [LANG_CODES[l] for l in languages]
+            idx = grid_menu("Select Language", lang_names)
+            if idx is None: continue
+            lang = languages[idx]
+        
+        # 4. Scan & Select Part
+        parts = scan_parts(class_num, lang, subject_code)
+        if len(parts) == 1:
+            part = parts[0]
+            print(f" {C.D}Only Part {part} available{C.E}")
+        else:
+            part_names = [f"Part {p}" for p in parts]
+            idx = grid_menu("Select Part", part_names)
+            if idx is None: continue
+            part = parts[idx]
+        
+        # 5. Download Type
+        book_code = f"{CLASS_CODES[class_num]}{lang}{subject_code}{part}"
+        
+        print(f"\n{C.Y}{'─'*tw()}{C.E}")
+        print(f" {C.BD}{C.G}Class {class_num} │ {LANG_CODES[lang]} │ {subject_name} │ Part {part}{C.E}")
+        print(f" {C.D}Code: {book_code}{C.E}")
+        
+        dl_opts = ["📦 Complete Book (ZIP)", "📄 Single Chapter", "📥 All Chapters"]
+        idx = grid_menu("Download Type", dl_opts, cols=1)
+        if idx is None: continue
+        
+        if idx == 0:
+            download_zip(class_num, lang, subject_name, subject_code, part)
+        else:
+            chapters = scan_chapters(book_code)
+            if not chapters:
+                print(f" {C.R}No chapters found{C.E}")
+            elif idx == 1:
+                download_chapter(class_num, lang, subject_name, subject_code, part, chapters)
+            else:
+                download_all_chapters(class_num, lang, subject_name, subject_code, part, chapters)
+        
+        # Continue?
+        print(f"\n{C.Y}{'─'*tw()}{C.E}")
+        if input(f" Download more? (y/n): ").lower() != 'y':
             break
-        
-        # Step 2: Select Language
-        language = select_language()
-        if not language:
-            continue
-        
-        # Step 3: Select Subject
-        result = select_subject(class_num)
-        if not result:
-            continue
-        subject, subject_code = result
-        
-        # Step 4: Find and select available parts
-        available_parts = find_available_parts(class_num, language, subject_code)
-        part = select_part(available_parts)
-        if not part:
-            continue
-        
-        # Step 5: Select Download Type
-        download_type = select_download_type()
-        if not download_type:
-            continue
-        
-        # Show summary
-        show_summary(class_num, language, subject, part)
-        
-        # Execute download
-        if download_type == 1:
-            download_complete_book(class_num, language, subject, subject_code, part)
-        elif download_type == 2:
-            download_single_chapter(class_num, language, subject, subject_code, part)
-        elif download_type == 3:
-            download_all_chapters(class_num, language, subject, subject_code, part)
-        
-        # Ask to continue
-        print(f"\n{Colors.YELLOW}{'─' * 50}{Colors.END}")
-        again = input(f"  Download more? (y/n): ").strip().lower()
-        if again != 'y':
-            print(f"\n  {Colors.GREEN}👋 Goodbye!{Colors.END}\n")
-            break
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+    
+    print(f"\n {C.G}👋 Goodbye!{C.E}\n")
 
 if __name__ == "__main__":
     try:
-        main_flow()
+        main()
     except KeyboardInterrupt:
-        print(f"\n\n  {Colors.YELLOW}⚡ Interrupted.{Colors.END}")
-        print(f"  {Colors.GREEN}👋 Goodbye!{Colors.END}\n")
-        sys.exit(0)
+        print(f"\n {C.Y}Interrupted{C.E}\n")
